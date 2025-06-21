@@ -1,4 +1,4 @@
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, File, UploadFile
 from fastapi.responses import JSONResponse
 from ultralytics import YOLO
 import shutil
@@ -12,30 +12,35 @@ model = YOLO("best.pt")
 async def predict(file: UploadFile = File(...)):
     temp_filename = f"temp_{uuid.uuid4().hex}.jpg"
     try:
-        # Save uploaded file to temp
         with open(temp_filename, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
 
         results = model(temp_filename)
-        boxes = results[0].boxes
 
-        if boxes is None or len(boxes) == 0:
-            # No detections
-            predictions = []
+        predictions = []
+        probs = results[0].probs  # classification probabilities
+        if probs is not None:
+            class_names = model.names
+            confidences = probs.data.cpu().numpy().tolist()
+            predictions = [
+                {"label": class_names[i], "confidence": round(conf, 2)}
+                for i, conf in enumerate(confidences)
+            ]
         else:
-            predictions = []
-            for box in boxes:
-                # box.xyxy: bounding box coordinates (tensor)
-                # box.conf: confidence score (tensor)
-                # box.cls: class id (tensor)
-                xyxy = box.xyxy.cpu().numpy().tolist()  # [x1, y1, x2, y2]
-                conf = float(box.conf.cpu().numpy())
-                cls_id = int(box.cls.cpu().numpy())
-                cls_name = model.names[cls_id] if model.names else str(cls_id)
+            # fallback in case it's object detection instead of classification
+            boxes = results[0].boxes
+            if boxes is not None:
+                for box in boxes:
+                    label = model.names[int(box.cls)]
+                    confidence = round(float(box.conf), 2)
+                    predictions.append({"label": label, "confidence": confidence})
 
-                predictions.append({
-                    "bbox": xyxy,
-                    "confidence": conf,
+    finally:
+        if os.path.exists(temp_filename):
+            os.remove(temp_filename)
+
+    return JSONResponse(content={"predictions": predictions})
+
                     "class_id": cls_id,
                     "class_name": cls_name
                 })

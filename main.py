@@ -1,58 +1,50 @@
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
-from ultralytics import YOLO
-from io import BytesIO
-import logging
+import shutil
+import uuid
+import os
 
 app = FastAPI()
-model = YOLO("best.pt")
-
-# Setup logging
-logging.basicConfig(level=logging.INFO)
 
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
-    # Validate file type
-    if not file.content_type.startswith("image/"):
-        raise HTTPException(status_code=400, detail="File must be an image.")
+    temp_filename = f"temp_{uuid.uuid4().hex}.jpg"
+    predictions = []
 
     try:
-        image_bytes = await file.read()
-        image_stream = BytesIO(image_bytes)
+        with open(temp_filename, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
 
-        results = model(image_stream)
+        results = model(temp_filename)
+        result = results[0]
 
-        predictions = []
-
-        # Handle classification
-        probs = results[0].probs
-        if probs is not None:
+        # Classification output
+        if getattr(result, "probs", None) is not None:
             class_names = model.names
-            confidences = probs.data.cpu().numpy().tolist()
-
+            confidences = result.probs.data.cpu().numpy().tolist()
             predictions = [
-                {
-                    "label": class_names[i],
-                    "confidence": round(conf, 2)
-                }
-                for i, conf in enumerate(confidences) if conf > 0.01  # confidence threshold
+                {"label": class_names[i], "confidence": round(conf, 2)}
+                for i, conf in enumerate(confidences)
             ]
-        else:
-            # Handle object detection fallback
-            boxes = results[0].boxes
-            if boxes is not None:
-                for box in boxes:
-                    cls_id = int(box.cls[0])
-                    conf = round(float(box.conf[0]), 2)
-                    label = model.names.get(cls_id, f"class_{cls_id}")
-                    predictions.append({
-                        "label": label,
-                        "confidence": conf
-                    })
+
+        # Object detection output (fallback)
+        elif getattr(result, "boxes", None) is not None and getattr(result.boxes, "data", None) is not None:
+            for box in result.boxes:
+                cls_id = int(box.cls)
+                label = model.names[cls_id]
+                confidence = round(float(box.conf), 2)
+                predictions.append({"label": label, "confidence": confidence})
 
     except Exception as e:
-        logging.error("Prediction failed", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Prediction failed: {e}")
 
+    finally:
+        if os.path.exists(temp_filename):
+            os.remove(temp_filename)
+
+    if not predictions:
+        return JSONResponse(content={"message": "No predictions found."})
+
     return JSONResponse(content={"predictions": predictions})
+
 
